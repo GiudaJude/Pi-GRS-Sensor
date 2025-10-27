@@ -1,3 +1,6 @@
+# **IMPORTANT NOTE**
+Do not clone this repository, simply follow the instructions below
+
 # GRS Feet Sensor
 
 Github Repository for GRS Feet Sensor
