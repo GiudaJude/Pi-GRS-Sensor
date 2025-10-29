@@ -13,10 +13,11 @@ mkdir sensor
 cd sensor
 ```
 
-Clone [grove.py](https://github.com/Seeed-Studio/grove.py) from GitHub
+Clone [grove.py](https://github.com/Seeed-Studio/grove.py) from GitHub and go into directory
 
 ```bash
-git clone https://github.com/Seeed-Studio/grove.py.git
+git clone https://github.com/Seeed-Studio/grove.py.git'
+cd grove.py
 ```
 
 Now clone the grove sensor into pytorch
@@ -31,4 +32,5 @@ Use the number of the port you are connected to.
 
 ```python
 python vibe.py 0
+
 ```
