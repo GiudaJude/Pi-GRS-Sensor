@@ -16,7 +16,9 @@ cd sensor
 Clone [grove.py](https://github.com/Seeed-Studio/grove.py) from GitHub and go into directory
 
 ```bash
-git clone https://github.com/Seeed-Studio/grove.py.git'
+git clone https://github.com/Seeed-Studio/grove.py.git
+```
+```
 cd grove.py
 ```
 
@@ -34,4 +36,5 @@ Use the number of the port you are connected to.
 python vibe.py 0
 
 ```
+
 
