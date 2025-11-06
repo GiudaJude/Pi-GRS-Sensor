@@ -18,7 +18,7 @@ class GroveGSRSensor:
 ADC_MAX = 1023       # 10-bit ADC
 V_REF = 3.3          # Reference voltage (V)
 R_FIXED = 100000.0   # Fixed resistor in ohms (100 kΩ typical)
-MAX_GSR = 40.0       # Maximum allowed GSR value (μS)
+# MAX_GSR = 40.0       # Maximum allowed GSR value (μS)
 
 def adc_to_us(adc_value):
     """Convert ADC reading to micro-Siemens (μS)."""
@@ -30,9 +30,9 @@ def adc_to_us(adc_value):
         g_siemens = 1.0 / r_skin
         g_microsiemens = g_siemens * 1e6
 
-        # Cap the value at MAX_GSR
+        """# Cap the value at MAX_GSR
         if g_microsiemens > MAX_GSR:
-            g_microsiemens = MAX_GSR
+            g_microsiemens = MAX_GSR"""
 
         return g_microsiemens
     except ZeroDivisionError:
@@ -63,6 +63,8 @@ def main():
             now = time.time() - start_time
 
             if gsr_us is not None:
+                if gsr_us_values and abs(gsr_us_values[-1] - gsr_us) >  10:
+                    continue
                 times.append(now)
                 gsr_us_values.append(gsr_us)
                 print(f"{now:8.2f}\t{gsr_us:8.3f}")
