@@ -5,9 +5,14 @@ import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import GroupKFold
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as LDA
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
 import warnings
 import os
+import glob
+from dotenv import load_dotenv
 warnings.filterwarnings('ignore')
 
 def load_subject_data(subject_path):
@@ -51,15 +56,31 @@ def load_subject_data(subject_path):
             
             print(f"  EDA length: {eda_length}, Label length: {label_length}")
             
+            # If labels are longer (higher sampling rate) than EDA, DO NOT downsample labels.
+            # Instead resample / upsample the EDA signal to match the label length using
+            # linear interpolation. This preserves label resolution (as the paper does).
             if label_length > eda_length:
-                # Downsample labels to match EDA sampling rate
-                downsample_factor = label_length // eda_length
-                # Take every nth label to match EDA sampling
-                downsampled_labels = labels[::downsample_factor][:eda_length]
-                labels = downsampled_labels
-                print(f"  Downsampled labels by factor {downsample_factor}")
+                eda_length_before = eda_length
+                try:
+                    # Create normalized sample positions and interpolate
+                    x_old = np.linspace(0, 1, eda_length)
+                    x_new = np.linspace(0, 1, label_length)
+                    eda_data = np.interp(x_new, x_old, eda_data)
+                    eda_length = len(eda_data)
+                    print(f"  Resampled EDA from {eda_length_before} -> {eda_length} to match labels")
+
+                    # Optional: small smoothing after upsampling to reduce interpolation noise
+                    # Uncomment the following lines to apply a simple moving average
+                    # window = 3
+                    # eda_data = np.convolve(eda_data, np.ones(window)/window, mode='same')
+                except Exception as e:
+                    # If interpolation fails, fall back to truncation (safe fallback)
+                    print(f"  Warning: EDA resampling failed: {e}; falling back to truncation")
+                    min_length = min(eda_length, label_length)
+                    eda_data = eda_data[:min_length]
+                    labels = labels[:min_length]
             else:
-                # If labels are shorter, truncate EDA
+                # If labels are shorter or equal length, truncate both to the minimum length
                 min_length = min(eda_length, label_length)
                 eda_data = eda_data[:min_length]
                 labels = labels[:min_length]
@@ -112,12 +133,13 @@ def load_subject_data(subject_path):
 
 def extract_advanced_features(eda_signal, window_size=128, step_size=64):
     """Extract comprehensive features from EDA signal"""
+    # Simplified feature set: only standard statistical features
     features = []
-    
+
     for i in range(0, len(eda_signal) - window_size + 1, step_size):
         window = eda_signal[i:i + window_size]
-        
-        # Basic statistical features
+
+        # Basic statistical features (retain only these)
         mean_eda = np.mean(window)
         std_eda = np.std(window)
         var_eda = np.var(window)
@@ -125,85 +147,31 @@ def extract_advanced_features(eda_signal, window_size=128, step_size=64):
         max_eda = np.max(window)
         range_eda = max_eda - min_eda
         median_eda = np.median(window)
-        
+
         # Percentile features
         q25 = np.percentile(window, 25)
         q75 = np.percentile(window, 75)
         iqr = q75 - q25
-        
-        # Derivative features (rate of change)
-        diff = np.diff(window)
-        mean_diff = np.mean(diff)
-        std_diff = np.std(diff)
-        max_diff = np.max(np.abs(diff))
-        
-        # Second derivative (acceleration)
-        diff2 = np.diff(diff)
-        mean_diff2 = np.mean(diff2) if len(diff2) > 0 else 0
-        std_diff2 = np.std(diff2) if len(diff2) > 0 else 0
-        
-        # Trend analysis
-        x = np.arange(len(window))
-        slope = np.polyfit(x, window, 1)[0] if len(window) > 1 else 0
-        
-        # Zero crossing rate (how often signal crosses the mean)
-        mean_centered = window - mean_eda
-        zero_crossings = np.sum(np.diff(np.sign(mean_centered)) != 0)
-        
-        # Peak detection
-        peaks = 0
-        troughs = 0
-        for j in range(1, len(window) - 1):
-            if window[j] > window[j-1] and window[j] > window[j+1]:
-                peaks += 1
-            elif window[j] < window[j-1] and window[j] < window[j+1]:
-                troughs += 1
-        
-        # Energy and power features
-        energy = np.sum(window ** 2)
-        power = energy / len(window)
-        
-        # Frequency domain features (simplified)
-        try:
-            fft = np.fft.fft(window)
-            power_spectrum = np.abs(fft) ** 2
-            
-            # Divide spectrum into frequency bands
-            low_freq_power = np.mean(power_spectrum[:len(power_spectrum)//4])
-            mid_freq_power = np.mean(power_spectrum[len(power_spectrum)//4:len(power_spectrum)//2])
-            high_freq_power = np.mean(power_spectrum[len(power_spectrum)//2:3*len(power_spectrum)//4])
-            
-            # Spectral centroid (frequency center of mass)
-            freqs = np.fft.fftfreq(len(window))
-            spectral_centroid = np.sum(freqs[:len(freqs)//2] * power_spectrum[:len(power_spectrum)//2]) / np.sum(power_spectrum[:len(power_spectrum)//2])
-        except:
-            low_freq_power = mid_freq_power = high_freq_power = spectral_centroid = 0
-        
-        # Combine all features
+
         feature_vector = [
-            # Time domain statistics
             mean_eda, std_eda, var_eda, min_eda, max_eda, range_eda, median_eda,
-            q25, q75, iqr,
-            
-            # Derivative features
-            mean_diff, std_diff, max_diff, mean_diff2, std_diff2,
-            
-            # Shape features
-            slope, zero_crossings, peaks, troughs,
-            
-            # Energy features
-            energy, power,
-            
-            # Frequency features
-            low_freq_power, mid_freq_power, high_freq_power, spectral_centroid
+            q25, q75, iqr
         ]
-        
+
         features.append(feature_vector)
-    
+
     return np.array(features)
 
-def prepare_multi_subject_data(subject_paths, window_size=128, step_size=64):
-    """Prepare combined dataset from multiple subjects"""
+def prepare_multi_subject_data(subject_paths, window_size=128, step_size=64, normalize_per_subject=True):
+    """Prepare combined dataset from multiple subjects
+
+    Args:
+        subject_paths: list of subject folders
+        window_size: samples per window
+        step_size: step (samples) between windows
+        normalize_per_subject: if True, apply StandardScaler to each subject's features
+            independently before combining. This removes between-subject scale differences.
+    """
     print("=== Loading Multi-Subject Data ===")
     
     all_features = []
@@ -240,6 +208,15 @@ def prepare_multi_subject_data(subject_paths, window_size=128, step_size=64):
                 # Convert to binary: 0=baseline, 1=stress
                 binary_labels = (filtered_labels == 2).astype(int)
                 
+                # Optional: per-subject normalization to remove between-subject offsets/scales
+                if normalize_per_subject and filtered_features.shape[0] > 0:
+                    subj_scaler = StandardScaler()
+                    try:
+                        filtered_features = subj_scaler.fit_transform(filtered_features)
+                    except Exception:
+                        # If scaling fails for any reason, continue without scaling
+                        pass
+                
                 all_features.append(filtered_features)
                 all_labels.append(binary_labels)
                 subject_ids.extend([subject_name] * len(filtered_features))
@@ -252,14 +229,18 @@ def prepare_multi_subject_data(subject_paths, window_size=128, step_size=64):
         # Combine all subjects
         combined_features = np.vstack(all_features)
         combined_labels = np.hstack(all_labels)
-        
+
+        # Downcast to smaller dtypes to reduce memory/storage for Raspberry Pi
+        combined_features = combined_features.astype(np.float32)
+        combined_labels = combined_labels.astype(np.int8)
+
         print(f"\n=== Combined Dataset ===")
         print(f"Total windows: {len(combined_features)}")
         print(f"Total features per window: {combined_features.shape[1]}")
         print(f"Baseline windows: {np.sum(combined_labels == 0)}")
         print(f"Stress windows: {np.sum(combined_labels == 1)}")
         print(f"Subjects: {len(set(subject_ids))}")
-        
+
         # Check if we have both classes
         if np.sum(combined_labels == 0) == 0:
             print("ERROR: No baseline samples found!")
@@ -270,7 +251,7 @@ def prepare_multi_subject_data(subject_paths, window_size=128, step_size=64):
         elif len(np.unique(combined_labels)) < 2:
             print("ERROR: Need both baseline and stress samples for classification!")
             return None, None, None
-        
+
         return combined_features, combined_labels, subject_ids
     else:
         print("ERROR: No valid data found from any subject!")
@@ -323,13 +304,9 @@ def train_multi_subject_classifier(features, labels, subject_ids):
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
     
-    # Define classifier - Logistic Regression only
+    # Define classifier - use only lightweight LDA for embedded deployment
     classifiers = {
-        'Logistic Regression': LogisticRegression(
-            random_state=42, 
-            max_iter=1000,
-            C=1.0
-        )
+        'LDA': LDA()
     }
     
     results = {}
@@ -352,40 +329,112 @@ def train_multi_subject_classifier(features, labels, subject_ids):
             else:
                 print(f"  Warning: Expected 2 classes, got {proba.shape[1]}")
         
-        # Evaluate
+        # Evaluate on held-out test set
         accuracy = accuracy_score(y_test, y_pred)
-        
-        # Cross-validation score
-        cv_scores = cross_val_score(clf, X_train_scaled, y_train, cv=5, scoring='accuracy')
-        
-        print(f"Accuracy: {accuracy:.4f}")
-        print(f"CV Accuracy: {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
+
+        # Proper group-aware cross-validation: put scaling inside a pipeline so
+        # scaling is fit only on training folds (no leakage). Use GroupKFold
+        # when multiple subjects are available in the training set.
+        pipeline = Pipeline([('scaler', StandardScaler()), ('clf', clf)])
+        try:
+            if 'train_mask' in locals():
+                groups_train = np.array(subject_ids)[train_mask]
+                n_groups = len(np.unique(groups_train))
+                if n_groups > 1:
+                    n_splits = min(5, n_groups)
+                    gkf = GroupKFold(n_splits=n_splits)
+                    cv_scores = cross_val_score(pipeline, X_train, y_train, cv=gkf, groups=groups_train, scoring='accuracy')
+                else:
+                    cv_scores = cross_val_score(pipeline, X_train, y_train, cv=5, scoring='accuracy')
+            else:
+                cv_scores = cross_val_score(pipeline, X_train, y_train, cv=5, scoring='accuracy')
+        except Exception as e:
+            print(f"  Warning: group CV failed ({e}), falling back to 5-fold CV")
+            cv_scores = cross_val_score(pipeline, X_train, y_train, cv=5, scoring='accuracy')
+
+        print(f"Accuracy (test set): {accuracy:.4f}")
+        print(f"CV Accuracy (grouped by subject): {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
         
         print(f"Classification Report:")
         print(classification_report(y_test, y_pred, target_names=['Baseline', 'Stress']))
         
+        # Save a compact numpy-only representation of the trained LDA so it can be
+        # loaded on a Raspberry Pi without scikit-learn. We store coef/intercept and
+        # scaler params (mean/scale) as float32 to minimize size.
+        try:
+            compact_path = 'lda_compact.npz'
+            np.savez_compressed(
+                compact_path,
+                coef=clf.coef_.astype(np.float32),
+                intercept=clf.intercept_.astype(np.float32),
+                classes=np.array(clf.classes_, dtype=np.int8),
+                scaler_mean=scaler.mean_.astype(np.float32),
+                scaler_scale=scaler.scale_.astype(np.float32)
+            )
+            print(f"  Saved compact LDA to {compact_path}")
+        except Exception as e:
+            print(f"  Warning: failed to save compact model: {e}")
+
         results[name] = {
-            'model': clf,
-            'scaler': scaler,
             'accuracy': accuracy,
             'cv_scores': cv_scores,
             'predictions': y_pred,
             'probabilities': y_pred_proba,
             'test_labels': y_test
         }
+        
+        # Keep only lightweight result entries (model saved separately as lda_compact.npz)
     
     return results
+
+
+def load_compact_lda(path='lda_compact.npz'):
+    """Load compact LDA params (numpy-only) saved by train_multi_subject_classifier.
+
+    Returns a dict with keys: coef, intercept, classes, scaler_mean, scaler_scale
+    """
+    d = np.load(path)
+    params = {
+        'coef': d['coef'],
+        'intercept': d['intercept'],
+        'classes': d['classes'],
+        'scaler_mean': d['scaler_mean'],
+        'scaler_scale': d['scaler_scale']
+    }
+    return params
+
+
+def predict_compact_lda(X, params):
+    """Predict using compact LDA params (numpy-only).
+
+    X: array shape (n_samples, n_features)
+    params: dict returned by load_compact_lda
+    Returns: predicted class labels (original class integers)
+    """
+    Xf = np.asarray(X, dtype=np.float32)
+    # apply scaler
+    Xs = (Xf - params['scaler_mean']) / params['scaler_scale']
+    # linear decision: coef dot x + intercept
+    logits = np.dot(Xs, params['coef'].T) + params['intercept']
+    # handle binary or multiclass logits
+    if logits.ndim == 2 and logits.shape[1] > 1:
+        preds = np.argmax(logits, axis=1)
+    else:
+        preds = (logits.ravel() > 0).astype(np.int64)
+    # map to original classes
+    try:
+        mapped = params['classes'][preds]
+        return mapped
+    except Exception:
+        return preds
 
 def analyze_feature_importance(results, feature_names=None):
     """Analyze which features are most important for stress detection"""
     if feature_names is None:
+        # Feature names for the simplified standard-statistics feature set
         feature_names = [
             'Mean', 'Std', 'Var', 'Min', 'Max', 'Range', 'Median',
-            'Q25', 'Q75', 'IQR',
-            'Mean_Diff', 'Std_Diff', 'Max_Diff', 'Mean_Diff2', 'Std_Diff2',
-            'Slope', 'Zero_Cross', 'Peaks', 'Troughs',
-            'Energy', 'Power',
-            'Low_Freq', 'Mid_Freq', 'High_Freq', 'Spectral_Centroid'
+            'Q25', 'Q75', 'IQR'
         ]
     
     print("\n=== Feature Importance Analysis ===")
@@ -478,16 +527,21 @@ def main():
     print("Multi-Subject WESAD Stress Classification")
     print("=" * 50)
     
-    # Define subject paths (excluding S14 which doesn't have proper stress data)
-    base_path = r"c:\Notre Dame\Machine Learning for Embedded Systems\ML Testing\WESAD\WESAD"
-    subject_paths = [
-        os.path.join(base_path, "S10"),
-        os.path.join(base_path, "S11"),
-        os.path.join(base_path, "S13")
-    ]
-    
-    # Check which subjects exist
-    existing_paths = [path for path in subject_paths if os.path.exists(path)]
+    # Load .env (project root) then determine WESAD base path
+    # Try to load .env from the repo root (one level up from this file)
+    env_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '.env'))
+    load_dotenv(env_path)
+
+    # Default base path (relative to this script) if WESAD_BASE not set in .env
+    default_base = os.path.abspath(os.path.join(os.path.dirname(__file__), 'WESAD', 'WESAD'))
+    base_path = os.environ.get('WESAD_BASE', default_base)
+
+    # Auto-discover subject folders (S*) under the base path
+    subject_paths = sorted(glob.glob(os.path.join(base_path, 'S*')))
+
+    # Check which subjects exist and report
+    existing_paths = [p for p in subject_paths if os.path.isdir(p)]
+    print(f"Using WESAD base: {base_path}")
     print(f"Found {len(existing_paths)} subjects: {[os.path.basename(p) for p in existing_paths]}")
     
     if len(existing_paths) == 0:
@@ -498,7 +552,8 @@ def main():
     features, labels, subject_ids = prepare_multi_subject_data(
         existing_paths, 
         window_size=128,  # ~8 seconds at 16Hz
-        step_size=64      # 50% overlap
+        step_size=64,     # 50% overlap
+        normalize_per_subject=True
     )
     
     if features is None:
