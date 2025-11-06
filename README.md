@@ -25,7 +25,7 @@ cd grove.py
 Now clone the grove sensor into pytorch
 
 ```bash
-wget -nc https://raw.githubusercontent.com/GiudaJude/Pi-GRS-Sensor/refs/heads/main/vibe.py
+wget -nc https://raw.githubusercontent.com/GiudaJude/Pi-GRS-Sensor/refs/heads/main/sensor.py
 ```
 
 ## Usage
@@ -36,5 +36,6 @@ Use the number of the port you are connected to.
 python vibe.py 0
 
 ```
+
 
 
