@@ -3,9 +3,7 @@ import time
 import matplotlib.pyplot as plt
 from grove.adc import ADC
 
-# -------------------------------
-# GSR Sensor Class
-# -------------------------------
+# Load GRS Sensor Class
 class GroveGSRSensor:
     def __init__(self, channel):
         self.channel = channel
@@ -16,31 +14,31 @@ class GroveGSRSensor:
         return self.adc.read(self.channel)
 
 
-# -------------------------------
-# Conversion: ADC ? microSiemens (xB5S)
-# -------------------------------
-# Adjust to your hardware setup
+# Adjust hardware setup
 ADC_MAX = 1023       # 10-bit ADC
 V_REF = 3.3          # Reference voltage (V)
-R_FIXED = 100000.0   # Fixed resistor in ohms (100 k? typical)
+R_FIXED = 100000.0   # Fixed resistor in ohms (100 kΩ typical)
+# MAX_GSR = 40.0       # Maximum allowed GSR value (μS)
 
 def adc_to_us(adc_value):
-    """Convert ADC reading to micro-Siemens (xB5S)."""
+    """Convert ADC reading to micro-Siemens (μS)."""
     v_out = (adc_value / ADC_MAX) * V_REF
     if v_out >= V_REF:
-        return None
+        return None 
     try:
         r_skin = (R_FIXED * v_out) / (V_REF - v_out)
         g_siemens = 1.0 / r_skin
         g_microsiemens = g_siemens * 1e6
+
+        """# Cap the value at MAX_GSR
+        if g_microsiemens > MAX_GSR:
+            g_microsiemens = MAX_GSR"""
+
         return g_microsiemens
     except ZeroDivisionError:
         return None
 
 
-# -------------------------------
-# Main Continuous Measurement
-# -------------------------------
 def main():
     if len(sys.argv) < 2:
         print(f"Usage: {sys.argv[0]} adc_channel")
@@ -51,7 +49,7 @@ def main():
 
     print("Monitoring GSR continuously (4 Hz)...")
     print("Press Ctrl+C to stop.\n")
-    print("Time(s)\tGSR (xB5S)")
+    print("Time(s)\tGSR (μS)")
 
     interval = 1 / 4.0  # 4 Hz = 0.25 s between samples
     start_time = time.time()
@@ -65,6 +63,8 @@ def main():
             now = time.time() - start_time
 
             if gsr_us is not None:
+                if gsr_us_values and abs(gsr_us_values[-1] - gsr_us) >  10:
+                    continue
                 times.append(now)
                 gsr_us_values.append(gsr_us)
                 print(f"{now:8.2f}\t{gsr_us:8.3f}")
@@ -78,9 +78,9 @@ def main():
         # --- Plot the entire session ---
         plt.figure(figsize=(10, 5))
         plt.plot(times, gsr_us_values, color='blue', linewidth=1)
-        plt.title("Continuous GSR Readings (xB5S) 4 Hz Sampling")
+        plt.title("Continuous GSR Readings (μS) 4 Hz Sampling")
         plt.xlabel("Time (seconds)")
-        plt.ylabel("GSR (xB5S)")
+        plt.ylabel("GSR (μS)")
         plt.grid(True)
         plt.show()
 

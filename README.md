@@ -13,16 +13,19 @@ mkdir sensor
 cd sensor
 ```
 
-Clone [grove.py](https://github.com/Seeed-Studio/grove.py) from GitHub
+Clone [grove.py](https://github.com/Seeed-Studio/grove.py) from GitHub and go into directory
 
 ```bash
 git clone https://github.com/Seeed-Studio/grove.py.git
+```
+```
+cd grove.py
 ```
 
 Now clone the grove sensor into pytorch
 
 ```bash
-wget -nc https://github.com/GiudaJude/Pi-GRS-Sensor/blob/main/vibe.py
+wget -nc https://raw.githubusercontent.com/GiudaJude/Pi-GRS-Sensor/refs/heads/main/sensor.py
 ```
 
 ## Usage
@@ -30,5 +33,10 @@ wget -nc https://github.com/GiudaJude/Pi-GRS-Sensor/blob/main/vibe.py
 Use the number of the port you are connected to.
 
 ```python
-python vibe.py 0
+python sensor.py 0
+
 ```
+
+
+
+
