@@ -33,9 +33,10 @@ wget -nc https://raw.githubusercontent.com/GiudaJude/Pi-GRS-Sensor/refs/heads/ma
 Use the number of the port you are connected to.
 
 ```python
-python vibe.py 0
+python sensor.py 0
 
 ```
+
 
 
 
