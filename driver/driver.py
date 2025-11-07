@@ -2,28 +2,36 @@ import sys
 import math
 import time
 from packet import Packet
-#from grove.adc import ADC
+from groveGSRsensor import GroveGSRSensor
+from grove.adc import ADC
+
+##########################
 
 #### GLOBAL VARIABLES ####
 
-cxn_timeout 		 = 120000		# Connection Timeout -- try and connect to any device for 2 min -- placeholder value 
-poll_sensor_window   = 4 			# get reading from sensor every x units -- placeholder value
-check_cxn_timer 	 = 60000 		# check connection every 60 s, 60000 ms -- placeholder value
+cxn_timeout 		 = 120   		# Connection Timeout -- try and connect to any device for 2 min -- placeholder value 
+check_cxn_timer 	 = 300    		# check connection every 300 s  -- placeholder value
+baseline_timer		 = 240			# Timer to measure baseline
+
+poll_gsr_window = 1 / 4.0 			# get reading from sensor every x units
+send_gsr_window = 30					# send reading to Pi every 30 sec
 
 ringbuffer = 0
 
-#### FUNCTIONS ####
+##########################
+
+#### COMMS FUNCTIONS ####
 
 def init_wifi():  # Initialize Wifi Comms Protocol
-	return 1
+	return 0
 def init_bt(): 	  # Initialize Bluetooth Comms Protocol
 	return 0
 def init_radio(): # Initialize Radio Comms Protocol
 	return 0
 def init_plug():  # Initialize Wired Pi Cxn Protocol
-	return 0
+	return 1
 
-def init_connect(cxn_type=0):
+def init_connect(cxn_type=3):
 
 	ready = 0
 
@@ -45,7 +53,7 @@ def init_connect(cxn_type=0):
 
 	return ready
 
-def choose_cxn_device(cxn_type=0):
+def choose_cxn_device(cxn_type=3):
 
 	## Try and Connect to a Device ##
 
@@ -67,15 +75,60 @@ def choose_cxn_device(cxn_type=0):
 
 	return cxn_type # return which device is connected 
 
+
+def chck_wifi():  # Check Wifi Cxn
+	return 0
+def chck_bt(): 	  # Check BT Cxn
+	return 0
+def chck_radio(): # Check Radio Cxn
+	return 0
+def chck_plug():  # Check Wired Pi Cxn
+	return 1
+
+def check_connect(cxn_type=3):
+
+	cxd = 0
+
+	if (cxn_type == 0): 		# WiFi
+		if(init_wifi() == 1):
+			cxd = 1
+
+	elif (cxn_type == 1): 		# Bluetooth
+		if(init_bt() == 1):
+			cxd = 1
+
+	elif (cxn_type == 2): 		# Radio
+		if(init_radio() == 1):
+			cxd = 1
+
+	elif(cxn_type == 3): 		# Plug
+		if(init_plug() == 1):
+			cxd = 1
+
+	return cxd
+
+
+##########################
+
+#### SENSOR FUNCTIONS ####
+
+def init_gsr(channel=0):  	# Connect to GSR Sensor
+	sensor = GroveGSRSensor(channel)
+	return sensor
+
+##########################
 #### MAIN FUNCTION ####
 
 def main():
 
 	## Initialize Sensors ##
 
+	channel = 0 # ADC Channel
+	gsr_sensor = init_gsr(channel)
+
 	## Intialize Connection ## 
-	connection_type = 0 # 0 W, 1 B, 2 R, 3 P
-	connection_type = choose_cxn_device(connection_type) # Default to WiFi or have some sort of decision var?
+	connection_type = 3 # 0 W, 1 B, 2 R, 3 P
+	connection_type = choose_cxn_device(connection_type) # Default to Plug or have some sort of decision var?
 
 	if(connection_type == 0):
 		print("wifi")
@@ -89,43 +142,82 @@ def main():
 		print("Error: Could not connect to a device")
 		exit(1)
 
+	start_gsr_recv = time.time()
+	start_gsr_send = time.time()
+
 	state = 'Sample' # Define State
 
 	## Begin Sampling Period ##
 
-	# get and store data from sensor
-	# format / possibly denoise
-	# perioidcally send to Pi
+	while( (time.time()-start_gsr_recv) < baseline_time ):
+
+		# Recv
+		if( (time.time() - start_gsr_recv) >= poll_gsr_window): # Accumlate baseline data
+			gsr_reading = gsr_sensor.read_GSR()
+			gsr_reading = gsr_sensor.adc_to_us(gsr_reading)
+			if not gsr_reading: 
+				pass # try again?
+			# accumulate into a data structure
+			# format Packet
+			start_gsr_time = time.time()
+
+		# Send
+		if( (time.time()-start_gsr_send) >= send_gsr_window): # Send accumulated data
+			# Send data to Pi
+			start_gsr_send = time.time()
+
+
+	## Stream Data ##
+
+	start_gsr_recv = time.time()
+	start_gsr_send = time.time()
+	start_cxn_chck = time.time()
 
 	state = 'Recv'
 
-	## Stream Data ##
-	
-	# while True: #
+	# Init Packet
 
-	#     # Check Connection Periodically #
+	while True:
 
-	#     if state == 'Recv':
-	#			# receive data from the sensor
-	#			# accumulate into a data structure
-	#			# format
+		# Check Connection Periodically #
+		if( (time.time() - start_cxn_chck) >= check_cxn_timer ):
+			# Check cxn to device
+			connected = check_connect(connection_type)
+			if not connected: choose_connect(connection_type)
+			start_cxn_chck = time.time()
 
-	#     elif state == 'Send':
-	#			# send data to Pi
-	#			# Receive ACK from Pi, else Try to Send Again [check cxn, etc.]
-	#			# state = 'Recv'
+		if state == 'Recv':
+			# Receive data from the sensor
+			if( (time.time() - start_gsr_recv) >= poll_gsr_window):
+				gsr_reading = gsr_sensor.read_GSR()
+				gsr_reading = gsr_sensor.adc_to_us(gsr_reading)
+				if not gsr_reading: 
+					pass # try again?
+				# accumulate into a data structure
+				# format Packet
+				start_gsr_time = time.time()
 
-	#     else:
-	#			state = 'Recv'
-	#			poll_sensor_window = 0
+			if( (time.time() - start_gsr_send) >= send_gsr_window): # Send accumulated data
+				state = 'Send'
+				start_gsr_send = time.time()
+
+		elif state == 'Send':
+			# Send data to Pi
+			# Receive ACK from Pi, else Try to Send Again [check cxn, etc.]
+			# Init a new Packet
+			state = 'Recv'
+
+		else:
+			state = 'Recv'
+			poll_gsr_window = time.time()
 
 	return 
 
+########################
 
 # make driver code general enough to think about > 1 sensor
 # make communication easy to “switch out” if possible
 # have an initial window of specific demographic and sampling baseline data before streaming data
-#	  I forget data rate but sensor might sample at like 4hz or something similar
 # leave a “denoising” chunk between receiving from sensor and sending it to model possibly
 # collect & send data every x time
 # packets – fixed sized packets
