@@ -5,6 +5,8 @@ from packet import Packet
 from groveGSRsensor import GroveGSRSensor
 from grove.adc import ADC
 
+## General Skeleton meant to be robust and easy to build on. ##
+
 ##########################
 
 #### GLOBAL VARIABLES ####
@@ -29,6 +31,7 @@ def init_bt(): 	  # Initialize Bluetooth Comms Protocol
 def init_radio(): # Initialize Radio Comms Protocol
 	return 0
 def init_plug():  # Initialize Wired Pi Cxn Protocol
+	# Defaul:
 	return 1
 
 def init_connect(cxn_type=3):
@@ -89,6 +92,8 @@ def check_connect(cxn_type=3):
 
 	cxd = 0
 
+	# Send a Msg & Get ACK Back
+
 	if (cxn_type == 0): 		# WiFi
 		if(init_wifi() == 1):
 			cxd = 1
@@ -114,6 +119,8 @@ def check_connect(cxn_type=3):
 
 def init_gsr(channel=0):  	# Connect to GSR Sensor
 	sensor = GroveGSRSensor(channel)
+	# Ensure sensor is connected
+
 	return sensor
 
 ##########################
@@ -215,6 +222,8 @@ def main():
 
 ########################
 
+# If connect to sensor but can't connect to device -> batch results to a max space?
+# phone notification?
 # make driver code general enough to think about > 1 sensor
 # make communication easy to “switch out” if possible
 # have an initial window of specific demographic and sampling baseline data before streaming data
