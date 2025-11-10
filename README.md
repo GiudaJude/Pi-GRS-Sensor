@@ -1,7 +1,7 @@
 # **IMPORTANT NOTE**
 Do not clone this repository, simply follow the instructions below
 
-# GRS Feet Sensor
+# GRS Sensor
 
 Github Repository for GRS Feet Sensor
 
@@ -36,6 +36,7 @@ Use the number of the port you are connected to.
 python sensor.py 0
 
 ```
+
 
 
 
