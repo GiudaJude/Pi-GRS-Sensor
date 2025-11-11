@@ -37,6 +37,26 @@ python sensor.py 0
 
 ```
 
+## Running Device Main
+
+To test the device's main functionality, use the following command:
+
+```bash
+python device_main.py <channel_number> --model "ML Testing\lda_full_pipeline.joblib" --fs 4 --window 8 --step 4
+```
+
+- Replace `<channel_number>` with the ADC channel number your GRS sensor is connected to.
+- The `--model` flag specifies the path to the complete joblib or compact LDA model file.
+- `--fs` sets the sampling rate in Hz (default: 4 Hz).
+- `--window` specifies the window length in seconds (default: 8 seconds).
+- `--step` sets the step length in seconds (default: 4 seconds).
+
+For example, if your sensor is connected to channel 0, you can run:
+
+```bash
+python device_main.py 0 --model "ML Testing\lda_full_pipeline.joblib" --fs 4 --window 8 --step 4
+```
+
 
 
 
