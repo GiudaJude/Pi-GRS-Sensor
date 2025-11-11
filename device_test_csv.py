@@ -82,79 +82,80 @@ def read_gsr_csv(path, col=None, sniff_rows=32):
     ncols = max(len(row) for row in sample)
 
     # If user provided a column index, use it (but safe-guard out-of-range)
-    if col is not None:
-        col_idx = int(col)
-        # fall back to 0 if out of bounds
-        if col_idx < 0 or col_idx >= ncols:
-            col_idx = 0
-    else:
-        # Header-aware detection: if the first non-empty sample row contains
-        # text like 'gsr' or 'gsr_us' prefer that column.
-        header_row = None
-        for row in sample:
-            # treat a row as header if any cell contains alphabetic characters
-            if any(any(ch.isalpha() for ch in (cell or '')) for cell in row):
-                header_row = row
-                break
+    # if col is not None:
+    #     col_idx = int(col)
+    #     # fall back to 0 if out of bounds
+    #     if col_idx < 0 or col_idx >= ncols:
+    #         col_idx = 0
+    # else:
+    #     # Header-aware detection: if the first non-empty sample row contains
+    #     # text like 'gsr' or 'gsr_us' prefer that column.
+    #     header_row = None
+    #     for row in sample:
+    #         # treat a row as header if any cell contains alphabetic characters
+    #         if any(any(ch.isalpha() for ch in (cell or '')) for cell in row):
+    #             header_row = row
+    #             break
 
-        if header_row is not None:
-            # normalize header names and look for common GSR/EDA column names
-            header_lower = [ (h or '').strip().lower() for h in header_row ]
-            preferred_names = ['gsr', 'gsr_us', 'gsrµs', 'eda', 'eda_us', 'eda_us', 'eda(µs)', 'eda_us']
-            found = False
-            for name in preferred_names:
-                if name in header_lower:
-                    col_idx = header_lower.index(name)
-                    found = True
-                    break
-            if not found:
-                # If header exists but no preferred names, pick the first numeric column after header
-                col_idx = None
-                for c in range(ncols):
-                    vals = []
-                    for row in sample[1:]:
-                        if c >= len(row):
-                            continue
-                        try:
-                            vals.append(float(row[c]))
-                        except Exception:
-                            break
-                    if len(vals) > 0:
-                        col_idx = c
-                        break
-                if col_idx is None:
-                    col_idx = 0
-        else:
-            # auto-detect numeric column using variance but penalize monotonic columns
-            col_scores = []
-            for c in range(ncols):
-                vals = []
-                for row in sample:
-                    if c >= len(row):
-                        continue
-                    try:
-                        v = float(row[c])
-                        vals.append(v)
-                    except Exception:
-                        continue
-                if len(vals) < 2:
-                    col_scores.append((c, -1.0))
-                    continue
-                arr = np.array(vals, dtype=float)
-                # base score: std + small mean magnitude
-                score = float(np.std(arr)) + 0.01 * float(np.abs(np.mean(arr)))
-                # penalize strongly if the column is mostly strictly increasing (likely timestamps)
-                diffs = np.diff(arr)
-                frac_increasing = float(np.sum(diffs > 0)) / max(1.0, len(diffs))
-                if frac_increasing > 0.9:
-                    score *= 0.1
-                col_scores.append((c, score))
+    #     if header_row is not None:
+    #         # normalize header names and look for common GSR/EDA column names
+    #         header_lower = [ (h or '').strip().lower() for h in header_row ]
+    #         preferred_names = ['gsr', 'gsr_us', 'gsrµs', 'eda', 'eda_us', 'eda_us', 'eda(µs)', 'eda_us']
+    #         found = False
+    #         for name in preferred_names:
+    #             if name in header_lower:
+    #                 col_idx = header_lower.index(name)
+    #                 found = True
+    #                 break
+    #         if not found:
+    #             # If header exists but no preferred names, pick the first numeric column after header
+    #             col_idx = None
+    #             for c in range(ncols):
+    #                 vals = []
+    #                 for row in sample[1:]:
+    #                     if c >= len(row):
+    #                         continue
+    #                     try:
+    #                         vals.append(float(row[c]))
+    #                     except Exception:
+    #                         break
+    #                 if len(vals) > 0:
+    #                     col_idx = c
+    #                     break
+    #             if col_idx is None:
+    #                 col_idx = 0
+    #     else:
+    #         # auto-detect numeric column using variance but penalize monotonic columns
+    #         col_scores = []
+    #         for c in range(ncols):
+    #             vals = []
+    #             for row in sample:
+    #                 if c >= len(row):
+    #                     continue
+    #                 try:
+    #                     v = float(row[c])
+    #                     vals.append(v)
+    #                 except Exception:
+    #                     continue
+    #             if len(vals) < 2:
+    #                 col_scores.append((c, -1.0))
+    #                 continue
+    #             arr = np.array(vals, dtype=float)
+    #             # base score: std + small mean magnitude
+    #             score = float(np.std(arr)) + 0.01 * float(np.abs(np.mean(arr)))
+    #             # penalize strongly if the column is mostly strictly increasing (likely timestamps)
+    #             diffs = np.diff(arr)
+    #             frac_increasing = float(np.sum(diffs > 0)) / max(1.0, len(diffs))
+    #             if frac_increasing > 0.9:
+    #                 score *= 0.1
+    #             col_scores.append((c, score))
 
-            # pick column with max score
-            col_idx = max(col_scores, key=lambda x: x[1])[0]
+    #         # pick column with max score
+    #         col_idx = max(col_scores, key=lambda x: x[1])[0]
 
     # Now read full CSV using selected column index
     vals = []
+    col_idx = int(col) if col is not None else 0
     with open(path, 'r', newline='') as cf:
         reader = csv.reader(cf)
         for r in reader:
@@ -178,8 +179,8 @@ def main():
     p.add_argument('csv', help='Path to CSV containing GSR values (µS) in first column')
     p.add_argument('--model', default='ML Testing/lda_compact.npz', help='Path to compact LDA .npz')
     p.add_argument('--fs', type=float, default=4.0, help='Sampling rate in Hz')
-    p.add_argument('--window', type=float, default=8.0, help='Window length in seconds')
-    p.add_argument('--step', type=float, default=4.0, help='Step length in seconds (hop)')
+    p.add_argument('--window', type=float, default=60, help='Window length in seconds')
+    p.add_argument('--step', type=float, default=30, help='Step length in seconds (hop)')
     p.add_argument('--col', type=int, default=0, help='CSV column index containing numeric GSR values')
     p.add_argument('--save', help='Optional: save predictions to CSV file')
     p.add_argument('--verbose', action='store_true', help='Print per-window features, scaled values, and logits for debugging')

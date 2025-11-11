@@ -1,10 +1,35 @@
 import time
 import argparse
 from collections import deque
+import joblib
+import os
+import numpy as np
 
 # local imports
 import sensor
 from data_processing import features_from_signal, load_compact_lda, predict_compact_lda
+
+
+def load_model_auto(path):
+    """Auto-detect model file type and load.
+
+    Returns a tuple (kind, model)
+      - kind == 'npz' -> model is compact params dict for predict_compact_lda
+      - kind == 'joblib' -> model is a sklearn Pipeline (requires joblib & sklearn installed)
+    """
+    p = str(path)
+    ext = os.path.splitext(p)[1].lower()
+    if ext == '.npz':
+        params = load_compact_lda(p)
+        return 'npz', params
+    elif ext in ('.joblib', '.ppl', '.pkl'):
+        try:
+            pipeline = joblib.load(p)
+            return 'joblib', pipeline
+        except Exception as e:
+            raise RuntimeError(f"joblib is required to load {p}: {e}")
+    else:
+        raise ValueError(f"Unsupported model file extension: {ext}")
 
 
 def run_stream(channel, model_path='ML Testing/lda_compact.npz', fs=4.0, window_seconds=8.0, step_seconds=4.0):
@@ -25,13 +50,13 @@ def run_stream(channel, model_path='ML Testing/lda_compact.npz', fs=4.0, window_
     step_counter = 0
 
     # load model once
-    params = None
+    model_kind, model_obj = None, None
     try:
-        params = load_compact_lda(model_path)
-        print(f"Loaded compact model from {model_path}")
+        model_kind, model_obj = load_model_auto(model_path)
+        print(f"Loaded model ({model_kind}): {model_path}")
     except Exception as e:
-        print(f"Warning: could not load compact model {model_path}: {e}")
-        params = None
+        print(f"Warning: could not load model {model_path}: {e}")
+        model_kind, model_obj = None, None
 
     print(f"Starting GSR streaming on channel {channel} (fs={fs} Hz). Window={window_seconds}s step={step_seconds}s")
     start = time.time()
@@ -58,9 +83,23 @@ def run_stream(channel, model_path='ML Testing/lda_compact.npz', fs=4.0, window_
                 # features_from_signal returns one or zero rows for a single window input
                 if feats.shape[0] > 0:
                     X = feats[0]
-                    if params is not None:
-                        pred = predict_compact_lda(X, params)
-                        print(f"{now:8.2f}s -> Prediction: {pred[0] if hasattr(pred, '__len__') else pred}")
+                    if model_obj is not None:
+                        if model_kind == 'npz':
+                            pred = predict_compact_lda(X, model_obj)
+                            prob = 1.0 / (1.0 + np.exp(-pred[1])) if len(pred) > 1 else None
+                            label = 'Stress' if pred[0] == 1 else 'Baseline'
+                        elif model_kind == 'joblib':
+                            X2 = X.reshape(1, -1)
+                            pred = model_obj.predict(X2)
+                            prob = None
+                            if hasattr(model_obj, 'predict_proba'):
+                                proba = model_obj.predict_proba(X2)
+                                prob = proba[0, 1] if pred[0] == 1 else proba[0, 0]
+                            label = 'Stress' if pred[0] == 1 else 'Baseline'
+                        if prob is not None:
+                            print(f"{now:8.2f}s -> Prediction: {label} (prob={prob:.3f})")
+                        else:
+                            print(f"{now:8.2f}s -> Prediction: {label}")
                     else:
                         print(f"{now:8.2f}s -> Features ready (no model): {X}")
 
@@ -75,8 +114,8 @@ if __name__ == '__main__':
     p.add_argument('channel', type=int, help='ADC channel for the GSR sensor')
     p.add_argument('--model', default='ML Testing/lda_compact.npz', help='Path to compact LDA .npz')
     p.add_argument('--fs', type=float, default=4.0, help='Sampling rate in Hz')
-    p.add_argument('--window', type=float, default=8.0, help='Window length in seconds')
-    p.add_argument('--step', type=float, default=4.0, help='Step length in seconds (hop)')
+    p.add_argument('--window', type=float, default=100, help='Window length in seconds')
+    p.add_argument('--step', type=float, default=30, help='Step length in seconds (hop)')
     args = p.parse_args()
 
     run_stream(args.channel, model_path=args.model, fs=args.fs, window_seconds=args.window, step_seconds=args.step)
