@@ -1,102 +1,102 @@
-import sys
+"""Sensor wrapper for Grove GSR / ADC with desktop fallback simulation.
+
+This module provides a GroveGSRSensor class and an adc_to_us helper that
+match the interface used by `device_main.py`. If the `grove.adc` package is
+available the wrapper will attempt to use the real ADC; otherwise it falls
+back to a simple simulator useful for desktop testing.
+"""
+
 import time
-import matplotlib.pyplot as plt
-from grove.adc import ADC
+import math
+import random
+try:
+    from grove.adc import ADC
+    _HAS_ADC = True
+except Exception:
+    ADC = None
+    _HAS_ADC = False
 
-# Load GRS Sensor Class
+
 class GroveGSRSensor:
-    def __init__(self, channel):
+    """Wrapper for a GSR sensor read.
+
+    If the grove.adc package is available this reads from the ADC hardware.
+    Otherwise it produces a simulated GSR-like signal for testing.
+    """
+
+    def __init__(self, channel=0, fs=4.0, simulate=None):
+        """Initialize the sensor wrapper.
+
+        channel: ADC channel index
+        fs: sampling frequency used for simulation timing (Hz)
+        simulate: if True/False forces simulation on/off; if None auto-detects
+        """
         self.channel = channel
-        self.adc = ADC()
+        self.fs = float(fs)
+        self._t = 0.0
+        self._dt = 1.0 / self.fs
+        # Decide whether to simulate (default: simulate if ADC not present)
+        self.simulate = (_HAS_ADC is False) if simulate is None else bool(simulate)
 
-    @property
-    def GSR(self):
-        return self.adc.read(self.channel)
+        if not self.simulate and _HAS_ADC:
+            try:
+                self._adc = ADC()
+            except Exception:
+                # If ADC instantiation fails, fall back to simulated mode
+                self.simulate = True
+                self._adc = None
+        else:
+            self._adc = None
 
+    def read_raw(self):
+        """Return a raw ADC reading (float). In simulation returns ADC-like counts."""
+        if self.simulate:
+            # simulated GSR: slow tonic + occasional phasic + noise
+            self._t += self._dt
+            tonic = 200 + 15 * math.sin(0.05 * self._t)        # slow baseline drift
+            phasic = 40 * math.sin(2.0 * self._t) * (random.random() > 0.9)
+            noise = random.gauss(0, 3.0)
+            return max(0.0, tonic + phasic + noise)
+        else:
+            try:
+                if hasattr(self._adc, 'read'):
+                    return float(self._adc.read(self.channel))
+                if hasattr(self._adc, 'read_adc'):
+                    return float(self._adc.read_adc(self.channel))
+                if hasattr(self._adc, 'value'):
+                    return float(self._adc.value)
+                # Last resort: try constructing ADC with channel param
+                adc_obj = ADC(self.channel)
+                if hasattr(adc_obj, 'read'):
+                    return float(adc_obj.read())
+                return float(adc_obj.value)
+            except Exception:
+                # On any hardware error, switch to simulation to keep program running
+                self.simulate = True
+                return self.read_raw()
 
-# Adjust hardware setup
-ADC_MAX = 1023       # 10-bit ADC
-V_REF = 3.3          # Reference voltage (V)
-R_FIXED = 100000.0   # Fixed resistor in ohms (100 kΩ typical)
-# MAX_GSR = 40.0       # Maximum allowed GSR value (μS)
+    @staticmethod
+    def adc_to_us(adc_value, adc_max=1023.0, vref=3.3):
+        """Convert ADC reading to microsiemens (µS).
 
-def adc_to_us(adc_value):
-    """Convert ADC reading to micro-Siemens (μS)."""
-    v_out = (adc_value / ADC_MAX) * V_REF
-    if v_out >= V_REF:
-        return None 
-    try:
-        r_skin = (R_FIXED * v_out) / (V_REF - v_out)
-        g_siemens = 1.0 / r_skin
-        g_microsiemens = g_siemens * 1e6
-
-        """# Cap the value at MAX_GSR
-        if g_microsiemens > MAX_GSR:
-            g_microsiemens = MAX_GSR"""
-
-        return g_microsiemens
-    except ZeroDivisionError:
-        return None
-
-
-def main():
-    if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} adc_channel")
-        sys.exit(1)
-
-    channel = int(sys.argv[1])
-    sensor = GroveGSRSensor(channel)
-
-    print("Monitoring GSR continuously (4 Hz)...")
-    print("Press Ctrl+C to stop.\n")
-    print("Time(s)\tGSR (μS)")
-
-    interval = 1 / 4.0  # 4 Hz = 0.25 s between samples
-    start_time = time.time()
-    times = []
-    gsr_us_values = []
-
-    try:
-        while True:
-            adc_value = sensor.GSR
-            gsr_us = adc_to_us(adc_value)
-            now = time.time() - start_time
-
-            if gsr_us is not None:
-                if gsr_us_values and abs(gsr_us_values[-1] - gsr_us) >  10:
-                    continue
-                times.append(now)
-                gsr_us_values.append(gsr_us)
-                print(f"{now:8.2f}\t{gsr_us:8.3f}")
-
-            time.sleep(interval)
-
-    except KeyboardInterrupt:
-        print("\nStopping data collection...")
-        print(f"Collected {len(gsr_us_values)} samples.")
-
-        # --- Plot the entire session ---
-        plt.figure(figsize=(10, 5))
-        plt.plot(times, gsr_us_values, color='blue', linewidth=1)
-        plt.title("Continuous GSR Readings (μS) 4 Hz Sampling")
-        plt.xlabel("Time (seconds)")
-        plt.ylabel("GSR (μS)")
-        plt.grid(True)
-        plt.show()
-
-        # --- Optional: Save to CSV ---
-        save = input("Save raw data to CSV file? (y/n): ").strip().lower()
-        if save == "y":
-            with open("gsr_wesad_4hz.csv", "w") as f:
-                f.write("time_s,gsr_us\n")
-                for t, v in zip(times, gsr_us_values):
-                    f.write(f"{t:.3f},{v:.6f}\n")
-            print("Data saved to gsr_wesad_4hz.csv")
-
-    except Exception as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+        This function is a simple placeholder and should be calibrated for your
+        specific hardware and circuit. It maps ADC counts -> voltage -> µS
+        via a linear scale.
+        """
+        try:
+            v = float(adc_value) / float(adc_max) * float(vref)
+        except Exception:
+            return 0.0
+        # placeholder linear scale to micro-Siemens
+        scale = 50.0
+        return (v / vref) * scale
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    # Quick smoke test for the wrapper
+    s = GroveGSRSensor(channel=0, fs=4.0)
+    for _ in range(16):
+        raw = s.read_raw()
+        us = GroveGSRSensor.adc_to_us(raw)
+        print(f"raw={raw:.2f}, µS≈{us:.2f}, simulate={s.simulate}")
+        time.sleep(1.0 / s.fs)

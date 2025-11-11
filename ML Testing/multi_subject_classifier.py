@@ -14,6 +14,7 @@ import os
 import glob
 from dotenv import load_dotenv
 warnings.filterwarnings('ignore')
+import joblib
 
 def load_subject_data(subject_path):
     """Load data for a single subject"""
@@ -374,6 +375,18 @@ def train_multi_subject_classifier(features, labels, subject_ids):
             print(f"  Saved compact LDA to {compact_path}")
         except Exception as e:
             print(f"  Warning: failed to save compact model: {e}")
+
+        # Also save a full sklearn Pipeline (scaler + classifier) for desktop testing
+        # This keeps the fitted scaler and the classifier together so the exact
+        # preprocessing used during training is preserved.
+        try:
+            full_path = 'lda_full_pipeline.joblib'
+            # 'scaler' is the fitted StandardScaler used above
+            fitted_pipeline = Pipeline([('scaler', scaler), ('clf', clf)])
+            joblib.dump(fitted_pipeline, full_path)
+            print(f"  Saved full sklearn pipeline to {full_path}")
+        except Exception as e:
+            print(f"  Warning: failed to save full pipeline: {e}")
 
         results[name] = {
             'accuracy': accuracy,
