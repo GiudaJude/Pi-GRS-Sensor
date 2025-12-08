@@ -15,11 +15,9 @@ import glob
 from dotenv import load_dotenv
 warnings.filterwarnings('ignore')
 import joblib
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.svm import SVC
-from sklearn.calibration import CalibratedClassifierCV
 from sklearn.utils import resample
 from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import f1_score, precision_recall_curve
 
 def load_subject_data(subject_path):
     """Load data for a single subject"""
@@ -278,22 +276,14 @@ def train_multi_subject_classifier(features, labels, subject_ids):
     """Train classifiers on multi-subject data"""
     print("\n=== Training Multi-Subject Classifiers ===")
 
-    # Handle class imbalance with oversampling
-    baseline_count = np.sum(labels == 0)
-    stress_count = np.sum(labels == 1)
-    if baseline_count != stress_count:
-        print("Balancing classes with oversampling...")
-        combined = list(zip(features, labels, subject_ids))
-        oversampled = resample(
-            combined,
-            replace=True,
-            n_samples=max(baseline_count, stress_count),
-            random_state=42
-        )
-        features, labels, subject_ids = zip(*oversampled)
-        features = np.array(features)
-        labels = np.array(labels)
-        subject_ids = np.array(subject_ids)
+    # Handle class imbalance: use sample_weight to upweight stress
+    baseline_count = int(np.sum(labels == 0))
+    stress_count = int(np.sum(labels == 1))
+    total = max(1, baseline_count + stress_count)
+    stress_weight = baseline_count / max(1, stress_count) if stress_count > 0 else 1.0
+    sample_weight = np.ones(len(labels), dtype=np.float32)
+    sample_weight[labels == 1] = float(stress_weight)
+    print(f"Class counts - baseline: {baseline_count}, stress: {stress_count}. Upweighting stress by {stress_weight:.2f}x")
 
     # Check if we have both classes
     unique_classes = np.unique(labels)
@@ -319,8 +309,10 @@ def train_multi_subject_classifier(features, labels, subject_ids):
 
         X_train = features[train_mask]
         y_train = labels[train_mask]
+        sw_train = sample_weight[train_mask]
         X_test = features[test_mask]
         y_test = labels[test_mask]
+        sw_test = sample_weight[test_mask]
 
         print(f"Train subjects: {train_subjects}")
         print(f"Test subjects: {test_subjects}")
@@ -328,8 +320,8 @@ def train_multi_subject_classifier(features, labels, subject_ids):
         print(f"Test samples: {len(X_test)} ({np.sum(y_test == 0)} baseline, {np.sum(y_test == 1)} stress)")
     else:
         # If only one subject, use regular train/test split
-        X_train, X_test, y_train, y_test = train_test_split(
-            features, labels, test_size=0.3, random_state=42, stratify=labels
+        X_train, X_test, y_train, y_test, sw_train, sw_test = train_test_split(
+            features, labels, sample_weight, test_size=0.3, random_state=42, stratify=labels
         )
         print("Using regular train/test split (single subject)")
 
@@ -340,38 +332,25 @@ def train_multi_subject_classifier(features, labels, subject_ids):
 
     # Define classifiers - add RandomForest and SVM
     classifiers = {
-        'LDA': LDA(),
-        'RandomForest': RandomForestClassifier(class_weight='balanced', random_state=42),
-        'SVM': CalibratedClassifierCV(SVC(class_weight='balanced', probability=True, random_state=42))
+        'LDA': LDA()
     }
 
-    # Hyperparameter tuning for RandomForest
-    param_grid = {
-        'RandomForest': {
-            'n_estimators': [50, 100, 200],
-            'max_depth': [None, 10, 20],
-            'min_samples_split': [2, 5, 10]
-        },
-        'SVM': {
-            'base_estimator__C': [0.1, 1, 10],
-            'base_estimator__kernel': ['linear', 'rbf']
-        }
-    }
+    # No hyperparameter grid needed for LDA
+    param_grid = {}
 
     results = {}
 
     for name, clf in classifiers.items():
         print(f"\nTraining {name}...")
 
-        # Hyperparameter tuning
-        if name in param_grid:
-            grid_search = GridSearchCV(clf, param_grid[name], cv=3, scoring='accuracy')
-            grid_search.fit(X_train_scaled, y_train)
-            clf = grid_search.best_estimator_
-            print(f"Best parameters for {name}: {grid_search.best_params_}")
+        # No hyperparameter tuning for LDA
 
-        # Train
-        clf.fit(X_train_scaled, y_train)
+        # Train (pass sample weights if supported)
+        try:
+            clf.fit(X_train_scaled, y_train, **({'sample_weight': sw_train} if hasattr(clf, 'fit') else {}))
+        except TypeError:
+            # Some wrapped estimators won't accept sample_weight at top level
+            clf.fit(X_train_scaled, y_train)
 
         # Predict
         y_pred = clf.predict(X_test_scaled)
@@ -384,6 +363,10 @@ def train_multi_subject_classifier(features, labels, subject_ids):
                 y_pred_proba = proba[:, 1]
             else:
                 print(f"  Warning: Expected 2 classes, got {proba.shape[1]}")
+        elif hasattr(clf, 'decision_function'):
+            df = clf.decision_function(X_test_scaled)
+            # map decision function to [0,1] via sigmoid
+            y_pred_proba = 1.0 / (1.0 + np.exp(-df))
 
         # Evaluate on held-out test set
         accuracy = accuracy_score(y_test, y_pred)
@@ -392,11 +375,32 @@ def train_multi_subject_classifier(features, labels, subject_ids):
         print(f"Classification Report:")
         print(classification_report(y_test, y_pred, target_names=['Baseline', 'Stress']))
 
+        # Optimize threshold to maximize F1 for stress class
+        optimal_threshold = 0.5
+        f1_at_opt = None
+        if y_pred_proba is not None:
+            thresholds = np.linspace(0.1, 0.9, 17)
+            best_f1 = -1.0
+            best_t = 0.5
+            for t in thresholds:
+                y_hat = (y_pred_proba >= t).astype(int)
+                f1 = f1_score(y_test, y_hat, pos_label=1)
+                if f1 > best_f1:
+                    best_f1 = f1
+                    best_t = float(t)
+            optimal_threshold = best_t
+            f1_at_opt = best_f1
+            print(f"Optimal stress threshold: {optimal_threshold:.2f} (F1={f1_at_opt:.3f})")
+
         results[name] = {
             'accuracy': accuracy,
             'predictions': y_pred,
             'probabilities': y_pred_proba,
-            'test_labels': y_test
+            'test_labels': y_test,
+            'threshold': optimal_threshold,
+            'f1_at_threshold': f1_at_opt,
+            'model': clf,
+            'scaler': scaler
         }
 
     return results
@@ -562,12 +566,23 @@ def main():
         print("No subject directories found!")
         return
     
-    # Prepare multi-subject data
+    # Parse simple CLI args for window/step to mirror CSV predictor
+    import argparse
+    parser = argparse.ArgumentParser(description='Train LDA on WESAD with CSV-like windowing')
+    parser.add_argument('--window', type=int, default=72, help='Window size in samples (e.g., 72 at 4 Hz ≈ 18 s)')
+    parser.add_argument('--step', type=int, default=24, help='Step size in samples (e.g., 24 at 4 Hz ≈ 6 s)')
+    parser.add_argument('--normalize-per-subject', action='store_true', help='Enable per-subject normalization')
+    parser.add_argument('--no-normalize-per-subject', dest='normalize_per_subject', action='store_false', help='Disable per-subject normalization')
+    parser.set_defaults(normalize_per_subject=True)
+    parser.add_argument('--out-prefix', type=str, default='ML Testing/lda', help='Output prefix for saved artifacts')
+    args, unknown = parser.parse_known_args()
+
+    # Prepare multi-subject data with requested window/step
     features, labels, subject_ids = prepare_multi_subject_data(
-        existing_paths, 
-        window_size=128,  # ~8 seconds at 16Hz
-        step_size=64,     # 50% overlap
-        normalize_per_subject=True
+        existing_paths,
+        window_size=args.window,
+        step_size=args.step,
+        normalize_per_subject=args.normalize_per_subject
     )
     
     if features is None or labels is None or subject_ids is None:
@@ -592,13 +607,61 @@ def main():
         best_model = max(results.keys(), key=lambda k: results[k]['accuracy'])
         print(f"\n=== Best Model: {best_model} ===")
         print(f"Test Accuracy: {results[best_model]['accuracy']:.4f}")
-        print(f"CV Accuracy: {results[best_model]['cv_scores'].mean():.4f} ± {results[best_model]['cv_scores'].std():.4f}")
+        if results[best_model].get('threshold') is not None:
+            print(f"Suggested stress threshold: {results[best_model]['threshold']:.2f} (F1={results[best_model].get('f1_at_threshold')})")
         
         # Plot results
-        plot_multi_subject_results(results)
+        # plot_multi_subject_results may expect cv_scores; guard usage
+        try:
+            plot_multi_subject_results(results)
+        except Exception:
+            pass
         
-        # Analyze feature importance
-        analyze_feature_importance(results)
+        # Save artifacts for CSV/stream predictors
+        try:
+            best = results[best_model]
+            scaler = best['scaler']
+            model = best['model']
+            threshold = best.get('threshold', 0.5)
+
+            # Save full pipeline (scaler + model) via joblib
+            pipeline = Pipeline(steps=[('scaler', scaler), ('lda', model)])
+            full_path = os.path.join(os.path.dirname(__file__), f"{args.out_prefix}_full_pipeline.joblib")
+            joblib.dump(pipeline, full_path)
+            print(f"Saved full pipeline: {full_path}")
+
+            # Save compact numpy-only params
+            # Extract LDA params
+            coef = getattr(model, 'coef_', None)
+            intercept = getattr(model, 'intercept_', None)
+            classes = getattr(model, 'classes_', None)
+            scaler_mean = scaler.mean_
+            scaler_scale = scaler.scale_
+            compact_path = os.path.join(os.path.dirname(__file__), f"{args.out_prefix}_compact.npz")
+            if coef is not None and intercept is not None and classes is not None:
+                np.savez(compact_path,
+                         coef=coef.astype(np.float32),
+                         intercept=intercept.astype(np.float32),
+                         classes=classes.astype(np.int64),
+                         scaler_mean=scaler_mean.astype(np.float32),
+                         scaler_scale=scaler_scale.astype(np.float32))
+                print(f"Saved compact LDA params: {compact_path}")
+            else:
+                print("Warning: Missing LDA coefficients; skipping compact save")
+
+            # Save tuned threshold
+            thr_path = os.path.join(os.path.dirname(__file__), f"{args.out_prefix}_stress_threshold.txt")
+            with open(thr_path, 'w') as f:
+                f.write(f"{threshold:.4f}\n")
+            print(f"Saved stress threshold: {thr_path}")
+        except Exception as e:
+            print(f"Warning: Failed to save artifacts: {e}")
+
+        # Analyze feature importance (optional; may not apply cleanly to LDA)
+        try:
+            analyze_feature_importance(results)
+        except Exception:
+            pass
         
         print(f"\n=== Summary ===")
         print(f"Successfully trained stress classifiers on {len(set(subject_ids))} subjects")

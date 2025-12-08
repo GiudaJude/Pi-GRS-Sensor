@@ -41,7 +41,7 @@ def load_model_auto(path):
                 raise ValueError(f"Unsupported or unreadable model file: {e}")
 
 
-def run_stream(channel, model_path='ML Testing/lda_compact.npz', fs=4.0, window_seconds=8.0, step_seconds=4.0, smoother_windows=0, emit_on_change=False, min_emit_interval=0.0, verbose=False):
+def run_stream(channel, model_path='ML Testing/lda_compact.npz', fs=4.0, window_seconds=8.0, step_seconds=4.0, smoother_windows=0, emit_on_change=False, min_emit_interval=0.0, verbose=False, threshold=None, hysteresis_exit=None, min_state_windows=1, labels_only=False):
     # pass fs so the simulator (if used) samples with the same rate
     sensor_obj = sensor.GroveGSRSensor(channel, fs=fs)
     sensor_obj = sensor.GroveGSRSensor(channel, fs=fs)
@@ -76,6 +76,34 @@ def run_stream(channel, model_path='ML Testing/lda_compact.npz', fs=4.0, window_
             return 1 if sum(self.buf) > (len(self.buf) / 2) else 0
 
     smoother = MajorityVoteSmoother(window=smoother_windows) if smoother_windows and smoother_windows > 0 else None
+    # Hysteresis gate mirroring csv_prediction
+    class HysteresisGate:
+        def __init__(self, enter_threshold=0.7, exit_threshold=0.5, min_windows=3):
+            self.enter = float(enter_threshold)
+            self.exit = float(exit_threshold)
+            self.min_windows = int(max(1, min_windows))
+            self.state = 0
+            self.last_change_idx = -10**9
+            self.idx = 0
+        def update(self, p_stress):
+            try:
+                ps = float(p_stress)
+            except Exception:
+                ps = 0.0
+            can_switch = (self.idx - self.last_change_idx) >= self.min_windows
+            if self.state == 0 and ps >= self.enter and can_switch:
+                self.state = 1
+                self.last_change_idx = self.idx
+            elif self.state == 1 and ps < self.exit and can_switch:
+                self.state = 0
+                self.last_change_idx = self.idx
+            self.idx += 1
+            return self.state
+    gate = HysteresisGate(
+        enter_threshold=threshold if threshold is not None else 0.7,
+        exit_threshold=hysteresis_exit if hysteresis_exit is not None else 0.5,
+        min_windows=int(max(1, min_state_windows))
+    )
     last_emitted_label = None
     last_emit_time = -1e9
 
@@ -144,7 +172,8 @@ def run_stream(channel, model_path='ML Testing/lda_compact.npz', fs=4.0, window_
                             prob = None
                             if hasattr(model_obj, 'predict_proba'):
                                 proba = model_obj.predict_proba(X2)
-                                prob = proba[0, 1] if pred[0] == 1 else proba[0, 0]
+                                # always take stress probability (class 1) if binary
+                                prob = float(proba[0, 1]) if proba.shape[1] == 2 else float(np.max(proba))
                             elif hasattr(model_obj, 'decision_function'):
                                 df = model_obj.decision_function(X2)
                                 val = float(df.ravel()[0])
@@ -158,7 +187,10 @@ def run_stream(channel, model_path='ML Testing/lda_compact.npz', fs=4.0, window_
                             emission_label = sm_label
                             sm_label_str = 'Stress' if sm_label == 1 else 'Baseline'
                         else:
-                            emission_label = 1 if label == 'Stress' else 0
+                            # apply gate even without smoother
+                            gated = gate.update(prob if prob is not None else (1 if label == 'Stress' else 0))
+                            emission_label = gated
+                            label = 'Stress' if gated == 1 else 'Baseline'
 
                         should_emit = True
                         if emit_on_change:
@@ -172,10 +204,14 @@ def run_stream(channel, model_path='ML Testing/lda_compact.npz', fs=4.0, window_
                             last_emitted_label = emission_label
                             last_emit_time = now
                             out_label = sm_label_str if sm_label_str is not None else label
-                            if prob is not None:
-                                print(f"{now:8.2f}s -> Prediction: {out_label} (prob={prob:.3f})")
+                            if labels_only:
+                                # Print just the label string without timestamp or probability
+                                print(out_label)
                             else:
-                                print(f"{now:8.2f}s -> Prediction: {out_label}")
+                                if prob is not None:
+                                    print(f"{now:8.2f}s -> Prediction: {out_label} (prob={prob:.3f})")
+                                else:
+                                    print(f"{now:8.2f}s -> Prediction: {out_label}")
                     else:
                         print(f"{now:8.2f}s -> Features ready (no model): {X}")
 
@@ -196,7 +232,27 @@ if __name__ == '__main__':
     p.add_argument('--emit-on-change', action='store_true', help='Only print predictions when the label changes')
     p.add_argument('--min-emit-interval', type=float, default=0.0, help='Minimum seconds between emissions when using --emit-on-change')
     p.add_argument('--verbose', action='store_true', help='Print per-window diagnostics')
+    p.add_argument('--threshold', type=float, default=None, help='Stress entry threshold on probability')
+    p.add_argument('--hysteresis-exit', type=float, default=None, help='Stress exit threshold on probability')
+    p.add_argument('--min-state-windows', type=int, default=3, help='Minimum number of windows to stay in a state before switching')
+    p.add_argument('--threshold-file', type=str, default='', help='Optional path to a saved threshold text file')
+    p.add_argument('--labels-only', action='store_true', help='Print only the label (Stress/Baseline) without timestamps or probabilities')
     args = p.parse_args()
+
+    # Load threshold from file if provided
+    thr = args.threshold
+    thr_exit = args.hysteresis_exit
+    if args.threshold_file:
+        try:
+            with open(os.path.expanduser(args.threshold_file), 'r') as f:
+                txt = f.read().strip()
+                if not thr:
+                    thr = float(txt)
+                if thr_exit is None:
+                    thr_exit = max(0.0, min(1.0, float(thr) - 0.1))
+            print(f"Using threshold from file: {args.threshold_file} -> {thr:.3f}")
+        except Exception as e:
+            print(f"Warning: failed to read threshold file: {e}")
 
     run_stream(
         args.channel,
@@ -208,4 +264,8 @@ if __name__ == '__main__':
         emit_on_change=args.emit_on_change,
         min_emit_interval=args.min_emit_interval,
         verbose=args.verbose,
+        threshold=thr,
+        hysteresis_exit=thr_exit,
+        min_state_windows=args.min_state_windows,
+        labels_only=args.labels_only,
     )

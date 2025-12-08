@@ -17,6 +17,7 @@ import csv
 import os
 import sys
 import numpy as np
+import matplotlib.pyplot as plt
 from collections import deque
 from data_processing import features_from_signal, load_compact_lda, predict_compact_lda
 
@@ -187,6 +188,11 @@ def main():
     p.add_argument('--smoother', type=int, default=0, help='Majority-vote smoothing window (in windows). 0 = disabled')
     p.add_argument('--emit-on-change', action='store_true', help='Only print predictions when the label changes (reduces console output)')
     p.add_argument('--min-emit-interval', type=float, default=0.0, help='Minimum seconds between printed emissions when --emit-on-change is used')
+    p.add_argument('--threshold', type=float, default=0.7, help='Stress entry threshold on probability (default 0.7)')
+    p.add_argument('--hysteresis-exit', type=float, default=0.5, help='Stress exit threshold on probability (default 0.5)')
+    p.add_argument('--min-state-windows', type=int, default=3, help='Minimum number of windows to stay in a state before switching (debounce)')
+    p.add_argument('--plot', action='store_true', help='Plot p_stress vs time and labels after processing')
+    p.add_argument('--save-plot', type=str, default='', help='Optional path to save the plot image')
     args = p.parse_args()
 
     csv_path = os.path.expanduser(args.csv)
@@ -245,6 +251,7 @@ def main():
     # Predict for each window and print timestamp and prediction
     predictions = []
     times = []
+    probs_timeline = []
     # optional smoother
     class MajorityVoteSmoother:
         def __init__(self, window=3):
@@ -253,7 +260,7 @@ def main():
         def update(self, label_or_prob):
             # accept either a probability (float) or 0/1 label
             if isinstance(label_or_prob, float):
-                lbl = 1 if label_or_prob > 0.5 else 0
+                lbl = 1 if label_or_prob >= 0.5 else 0
             else:
                 try:
                     lbl = int(label_or_prob)
@@ -265,6 +272,29 @@ def main():
                 return lbl
             return 1 if sum(self.buf) > (len(self.buf) / 2) else 0
 
+    class HysteresisGate:
+        def __init__(self, enter_threshold=0.7, exit_threshold=0.5, min_windows=3):
+            self.enter = float(enter_threshold)
+            self.exit = float(exit_threshold)
+            self.min_windows = int(max(1, min_windows))
+            self.state = 0  # 0 baseline, 1 stress
+            self.last_change_idx = -10**9
+        def update(self, p_stress, idx):
+            try:
+                ps = float(p_stress)
+            except Exception:
+                ps = 0.0
+            # enforce minimum dwell time
+            can_switch = (idx - self.last_change_idx) >= self.min_windows
+            if self.state == 0 and ps >= self.enter and can_switch:
+                self.state = 1
+                self.last_change_idx = idx
+            elif self.state == 1 and ps < self.exit and can_switch:
+                self.state = 0
+                self.last_change_idx = idx
+            return self.state
+
+    gate = HysteresisGate(enter_threshold=args.threshold, exit_threshold=args.hysteresis_exit, min_windows=args.min_state_windows)
     smoother = MajorityVoteSmoother(window=args.smoother) if args.smoother and args.smoother > 0 else None
     # emission control state (used when --emit-on-change is enabled)
     last_emitted_label = None
@@ -313,8 +343,8 @@ def main():
                     # clamp logits to a safe range to avoid overflow and extremely large probabilities
                     val = float(np.clip(val, -50.0, 50.0))
                     prob = 1.0 / (1.0 + np.exp(-val))
-                    pred = predict_compact_lda(X, model_obj)
-                    label = int(pred[0] if hasattr(pred, '__len__') else pred)
+                    # gate-based label from probability (debounced)
+                    label = gate.update(prob, i)
             elif kind == 'joblib':
                 # model_obj is a sklearn Pipeline or estimator
                 try:
@@ -329,7 +359,8 @@ def main():
                             proba = model_obj.predict_proba(X2)
                             # pick the probability of the predicted class
                             if proba.shape[1] == 2:
-                                prob = float(proba[0, 1]) if label == 1 else float(proba[0, 0])
+                                # always take stress probability (class 1)
+                                prob = float(proba[0, 1])
                             else:
                                 # multiclass: prob of predicted index
                                 prob = float(np.max(proba))
@@ -339,6 +370,8 @@ def main():
                             prob = 1.0 / (1.0 + np.exp(-val))
                     except Exception:
                         prob = None
+                    # gate-based label from probability (debounced)
+                    label = gate.update(prob if prob is not None else (1 if label == 1 else 0), i)
                     if args.verbose:
                         print(f"Window {i} raw features: {X}")
                         # try to access decision_function or predict_proba if available
@@ -404,15 +437,16 @@ def main():
                     print(f"{timestamp:8.2f}s -> Prediction: {label_str} ({label})  smoothed: {sm_label_str} ({sm_label})")
             else:
                 if smoother is None:
-                    print(f"{timestamp:8.2f}s -> Prediction: {label_str} ({label})  prob={prob:.3f}")
+                    print(f"{timestamp:8.2f}s -> Prediction: {label_str} ({label})  p_stress={prob:.3f}  thr_in={args.threshold:.2f} thr_out={args.hysteresis_exit:.2f}")
                 else:
-                    print(f"{timestamp:8.2f}s -> Prediction: {label_str} ({label})  prob={prob:.3f}  smoothed: {sm_label_str} ({sm_label})")
+                    print(f"{timestamp:8.2f}s -> Prediction: {label_str} ({label})  p_stress={prob:.3f}  smoothed: {sm_label_str} ({sm_label})  thr_in={args.threshold:.2f} thr_out={args.hysteresis_exit:.2f}")
             last_emitted_label = emission_label
             last_emit_time = timestamp
 
         # always store per-window prediction for saving/analysis
         predictions.append({'label': label, 'label_str': label_str, 'prob': prob, 'label_smooth': sm_label, 'label_smooth_str': sm_label_str})
         times.append(timestamp)
+        probs_timeline.append(prob if prob is not None else (1.0 if (label == 1) else 0.0))
 
     if args.save:
         out_path = os.path.expanduser(args.save)
@@ -455,6 +489,52 @@ def main():
                     print(f"  Example prob= {probs[idx]:.12f}")
     except Exception:
         pass
+
+    # Plot p_stress vs time with labels if requested
+    try:
+        if args.plot:
+            t = np.asarray(times, dtype=np.float32)
+            ps = np.asarray(probs_timeline, dtype=np.float32)
+            lbl = np.asarray([p.get('label') if p.get('label') is not None else 0 for p in predictions], dtype=np.int32)
+            lbl_s = np.asarray([p.get('label_smooth') if p.get('label_smooth') is not None else -1 for p in predictions], dtype=np.int32)
+
+            fig, ax = plt.subplots(1, 1, figsize=(10, 4))
+            ax.plot(t, ps, label='p_stress', color='tab:red')
+            ax.set_ylim(-0.05, 1.05)
+            ax.set_xlabel('Time (s)')
+            ax.set_ylabel('Probability of Stress')
+            ax.grid(True, alpha=0.3)
+            # overlay thresholds
+            ax.axhline(args.threshold, color='tab:orange', linestyle='--', alpha=0.6, label=f'thr_in={args.threshold:.2f}')
+            ax.axhline(args.hysteresis_exit, color='tab:green', linestyle='--', alpha=0.6, label=f'thr_out={args.hysteresis_exit:.2f}')
+
+            # overlay label bands
+            try:
+                ax.fill_between(t, 0, 1, where=(lbl == 1), color='tab:red', alpha=0.08, transform=ax.get_xaxis_transform(), label='Stress (gate)')
+            except Exception:
+                pass
+            if np.any(lbl_s >= 0):
+                try:
+                    ax.fill_between(t, 0, 1, where=(lbl_s == 1), color='tab:purple', alpha=0.06, transform=ax.get_xaxis_transform(), label='Stress (smoothed)')
+                except Exception:
+                    pass
+            ax.legend(loc='upper right')
+
+            if args.save_plot:
+                out_plot = os.path.expanduser(args.save_plot)
+                try:
+                    fig.savefig(out_plot, dpi=150, bbox_inches='tight')
+                    print(f"Saved plot to {out_plot}")
+                except Exception as e:
+                    print(f"Failed to save plot: {e}")
+            else:
+                # show plot interactively
+                try:
+                    plt.show()
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"Plotting failed: {e}")
 
 
 if __name__ == '__main__':
