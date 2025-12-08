@@ -42,7 +42,7 @@ python sensor.py 0
 To test the device's main functionality, use the following command:
 
 ```bash
-python device_main.py 0 --model "ML Testing/lda_full_pipeline.joblib" --fs 4.0 --window 100 --step 30 
+python prediction_stream.py 0 --model "ML Testing\lda_full_pipeline.joblib" --fs 4 --window 20 --step 15
 ```
 
 - Replace `<channel_number>` with the ADC channel number your GRS sensor is connected to.

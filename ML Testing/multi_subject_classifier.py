@@ -15,6 +15,11 @@ import glob
 from dotenv import load_dotenv
 warnings.filterwarnings('ignore')
 import joblib
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.svm import SVC
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.utils import resample
+from sklearn.model_selection import GridSearchCV
 
 def load_subject_data(subject_path):
     """Load data for a single subject"""
@@ -154,9 +159,14 @@ def extract_advanced_features(eda_signal, window_size=128, step_size=64):
         q75 = np.percentile(window, 75)
         iqr = q75 - q25
 
+        # New features: entropy and frequency-domain features
+        entropy = -np.sum(window * np.log2(window + 1e-9))  # Signal entropy
+        fft_features = np.abs(np.fft.fft(window))[:window_size // 2]  # Frequency domain
+        power_spectral_density = np.sum(fft_features ** 2)
+
         feature_vector = [
             mean_eda, std_eda, var_eda, min_eda, max_eda, range_eda, median_eda,
-            q25, q75, iqr
+            q25, q75, iqr, entropy, power_spectral_density
         ]
 
         features.append(feature_vector)
@@ -174,19 +184,19 @@ def prepare_multi_subject_data(subject_paths, window_size=128, step_size=64, nor
             independently before combining. This removes between-subject scale differences.
     """
     print("=== Loading Multi-Subject Data ===")
-    
+
     all_features = []
     all_labels = []
-    subject_ids = []
-    
+    all_subject_ids = []  # Updated to ensure alignment
+
     for subject_path in subject_paths:
         eda_data, labels, subject_name = load_subject_data(subject_path)
-        
+
         if eda_data is not None and labels is not None:
             # Extract features
             print(f"  Extracting features for {subject_name}...")
             features = extract_advanced_features(eda_data, window_size, step_size)
-            
+
             # Get corresponding labels for each window
             window_labels = []
             for i in range(0, len(eda_data) - window_size + 1, step_size):
@@ -196,19 +206,19 @@ def prepare_multi_subject_data(subject_paths, window_size=128, step_size=64, nor
                     unique, counts = np.unique(window_label_segment, return_counts=True)
                     most_common = unique[np.argmax(counts)]
                     window_labels.append(most_common)
-            
+
             window_labels = np.array(window_labels[:len(features)])
-            
+
             # Filter for baseline (1) and stress (2) only
             stress_baseline_mask = (window_labels == 1) | (window_labels == 2)
-            
+
             if np.sum(stress_baseline_mask) > 0:
                 filtered_features = features[stress_baseline_mask]
                 filtered_labels = window_labels[stress_baseline_mask]
-                
+
                 # Convert to binary: 0=baseline, 1=stress
                 binary_labels = (filtered_labels == 2).astype(int)
-                
+
                 # Optional: per-subject normalization to remove between-subject offsets/scales
                 if normalize_per_subject and filtered_features.shape[0] > 0:
                     subj_scaler = StandardScaler()
@@ -217,19 +227,20 @@ def prepare_multi_subject_data(subject_paths, window_size=128, step_size=64, nor
                     except Exception:
                         # If scaling fails for any reason, continue without scaling
                         pass
-                
+
                 all_features.append(filtered_features)
                 all_labels.append(binary_labels)
-                subject_ids.extend([subject_name] * len(filtered_features))
-                
+                all_subject_ids.extend([subject_name] * len(filtered_features))  # Ensure alignment
+
                 print(f"  {subject_name}: {len(filtered_features)} windows ({np.sum(binary_labels == 0)} baseline, {np.sum(binary_labels == 1)} stress)")
             else:
                 print(f"  {subject_name}: No baseline/stress data found")
-    
+
     if len(all_features) > 0:
         # Combine all subjects
         combined_features = np.vstack(all_features)
         combined_labels = np.hstack(all_labels)
+        combined_subject_ids = np.array(all_subject_ids)  # Ensure subject_ids is a numpy array
 
         # Downcast to smaller dtypes to reduce memory/storage for Raspberry Pi
         combined_features = combined_features.astype(np.float32)
@@ -240,7 +251,7 @@ def prepare_multi_subject_data(subject_paths, window_size=128, step_size=64, nor
         print(f"Total features per window: {combined_features.shape[1]}")
         print(f"Baseline windows: {np.sum(combined_labels == 0)}")
         print(f"Stress windows: {np.sum(combined_labels == 1)}")
-        print(f"Subjects: {len(set(subject_ids))}")
+        print(f"Subjects: {len(set(combined_subject_ids))}")
 
         # Check if we have both classes
         if np.sum(combined_labels == 0) == 0:
@@ -253,7 +264,12 @@ def prepare_multi_subject_data(subject_paths, window_size=128, step_size=64, nor
             print("ERROR: Need both baseline and stress samples for classification!")
             return None, None, None
 
-        return combined_features, combined_labels, subject_ids
+        # Debugging: Ensure alignment of all arrays
+        assert len(combined_features) == len(combined_labels) == len(combined_subject_ids), (
+            f"Mismatch in data dimensions: Features={len(combined_features)}, Labels={len(combined_labels)}, Subject IDs={len(combined_subject_ids)}"
+        )
+
+        return combined_features, combined_labels, combined_subject_ids
     else:
         print("ERROR: No valid data found from any subject!")
         return None, None, None
@@ -261,34 +277,51 @@ def prepare_multi_subject_data(subject_paths, window_size=128, step_size=64, nor
 def train_multi_subject_classifier(features, labels, subject_ids):
     """Train classifiers on multi-subject data"""
     print("\n=== Training Multi-Subject Classifiers ===")
-    
+
+    # Handle class imbalance with oversampling
+    baseline_count = np.sum(labels == 0)
+    stress_count = np.sum(labels == 1)
+    if baseline_count != stress_count:
+        print("Balancing classes with oversampling...")
+        combined = list(zip(features, labels, subject_ids))
+        oversampled = resample(
+            combined,
+            replace=True,
+            n_samples=max(baseline_count, stress_count),
+            random_state=42
+        )
+        features, labels, subject_ids = zip(*oversampled)
+        features = np.array(features)
+        labels = np.array(labels)
+        subject_ids = np.array(subject_ids)
+
     # Check if we have both classes
     unique_classes = np.unique(labels)
     if len(unique_classes) < 2:
         print(f"ERROR: Cannot train classifier with only {len(unique_classes)} class(es)")
         print(f"Available classes: {unique_classes}")
         return None
-    
+
     print(f"Training with {len(unique_classes)} classes: {unique_classes}")
-    
+
     # Split data ensuring we don't mix subjects between train/test
     # This is important for generalization testing
     unique_subjects = list(set(subject_ids))
-    
+
     if len(unique_subjects) >= 2:
         # Use some subjects for training, others for testing
         n_train_subjects = max(1, len(unique_subjects) * 2 // 3)
         train_subjects = unique_subjects[:n_train_subjects]
         test_subjects = unique_subjects[n_train_subjects:]
-        
+
         train_mask = np.array([sid in train_subjects for sid in subject_ids])
         test_mask = np.array([sid in test_subjects for sid in subject_ids])
-        
+
         X_train = features[train_mask]
         y_train = labels[train_mask]
         X_test = features[test_mask]
         y_test = labels[test_mask]
-        
+
         print(f"Train subjects: {train_subjects}")
         print(f"Test subjects: {test_subjects}")
         print(f"Train samples: {len(X_train)} ({np.sum(y_train == 0)} baseline, {np.sum(y_train == 1)} stress)")
@@ -299,28 +332,50 @@ def train_multi_subject_classifier(features, labels, subject_ids):
             features, labels, test_size=0.3, random_state=42, stratify=labels
         )
         print("Using regular train/test split (single subject)")
-    
+
     # Scale features
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
-    
-    # Define classifier - use only lightweight LDA for embedded deployment
+
+    # Define classifiers - add RandomForest and SVM
     classifiers = {
-        'LDA': LDA()
+        'LDA': LDA(),
+        'RandomForest': RandomForestClassifier(class_weight='balanced', random_state=42),
+        'SVM': CalibratedClassifierCV(SVC(class_weight='balanced', probability=True, random_state=42))
     }
-    
+
+    # Hyperparameter tuning for RandomForest
+    param_grid = {
+        'RandomForest': {
+            'n_estimators': [50, 100, 200],
+            'max_depth': [None, 10, 20],
+            'min_samples_split': [2, 5, 10]
+        },
+        'SVM': {
+            'base_estimator__C': [0.1, 1, 10],
+            'base_estimator__kernel': ['linear', 'rbf']
+        }
+    }
+
     results = {}
-    
+
     for name, clf in classifiers.items():
         print(f"\nTraining {name}...")
-        
+
+        # Hyperparameter tuning
+        if name in param_grid:
+            grid_search = GridSearchCV(clf, param_grid[name], cv=3, scoring='accuracy')
+            grid_search.fit(X_train_scaled, y_train)
+            clf = grid_search.best_estimator_
+            print(f"Best parameters for {name}: {grid_search.best_params_}")
+
         # Train
         clf.fit(X_train_scaled, y_train)
-        
+
         # Predict
         y_pred = clf.predict(X_test_scaled)
-        
+
         # Get probabilities if available and we have binary classification
         y_pred_proba = None
         if hasattr(clf, 'predict_proba'):
@@ -329,75 +384,21 @@ def train_multi_subject_classifier(features, labels, subject_ids):
                 y_pred_proba = proba[:, 1]
             else:
                 print(f"  Warning: Expected 2 classes, got {proba.shape[1]}")
-        
+
         # Evaluate on held-out test set
         accuracy = accuracy_score(y_test, y_pred)
 
-        # Proper group-aware cross-validation: put scaling inside a pipeline so
-        # scaling is fit only on training folds (no leakage). Use GroupKFold
-        # when multiple subjects are available in the training set.
-        pipeline = Pipeline([('scaler', StandardScaler()), ('clf', clf)])
-        try:
-            if 'train_mask' in locals():
-                groups_train = np.array(subject_ids)[train_mask]
-                n_groups = len(np.unique(groups_train))
-                if n_groups > 1:
-                    n_splits = min(5, n_groups)
-                    gkf = GroupKFold(n_splits=n_splits)
-                    cv_scores = cross_val_score(pipeline, X_train, y_train, cv=gkf, groups=groups_train, scoring='accuracy')
-                else:
-                    cv_scores = cross_val_score(pipeline, X_train, y_train, cv=5, scoring='accuracy')
-            else:
-                cv_scores = cross_val_score(pipeline, X_train, y_train, cv=5, scoring='accuracy')
-        except Exception as e:
-            print(f"  Warning: group CV failed ({e}), falling back to 5-fold CV")
-            cv_scores = cross_val_score(pipeline, X_train, y_train, cv=5, scoring='accuracy')
-
         print(f"Accuracy (test set): {accuracy:.4f}")
-        print(f"CV Accuracy (grouped by subject): {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
-        
         print(f"Classification Report:")
         print(classification_report(y_test, y_pred, target_names=['Baseline', 'Stress']))
-        
-        # Save a compact numpy-only representation of the trained LDA so it can be
-        # loaded on a Raspberry Pi without scikit-learn. We store coef/intercept and
-        # scaler params (mean/scale) as float32 to minimize size.
-        try:
-            compact_path = 'lda_compact.npz'
-            np.savez_compressed(
-                compact_path,
-                coef=clf.coef_.astype(np.float32),
-                intercept=clf.intercept_.astype(np.float32),
-                classes=np.array(clf.classes_, dtype=np.int8),
-                scaler_mean=scaler.mean_.astype(np.float32),
-                scaler_scale=scaler.scale_.astype(np.float32)
-            )
-            print(f"  Saved compact LDA to {compact_path}")
-        except Exception as e:
-            print(f"  Warning: failed to save compact model: {e}")
-
-        # Also save a full sklearn Pipeline (scaler + classifier) for desktop testing
-        # This keeps the fitted scaler and the classifier together so the exact
-        # preprocessing used during training is preserved.
-        try:
-            full_path = 'lda_full_pipeline.joblib'
-            # 'scaler' is the fitted StandardScaler used above
-            fitted_pipeline = Pipeline([('scaler', scaler), ('clf', clf)])
-            joblib.dump(fitted_pipeline, full_path)
-            print(f"  Saved full sklearn pipeline to {full_path}")
-        except Exception as e:
-            print(f"  Warning: failed to save full pipeline: {e}")
 
         results[name] = {
             'accuracy': accuracy,
-            'cv_scores': cv_scores,
             'predictions': y_pred,
             'probabilities': y_pred_proba,
             'test_labels': y_test
         }
-        
-        # Keep only lightweight result entries (model saved separately as lda_compact.npz)
-    
+
     return results
 
 
@@ -569,10 +570,16 @@ def main():
         normalize_per_subject=True
     )
     
-    if features is None:
+    if features is None or labels is None or subject_ids is None:
         print("Failed to prepare data!")
         return
-    
+
+    # Validate alignment of features, labels, and subject_ids
+    if not (len(features) == len(labels) == len(subject_ids)):
+        print("ERROR: Mismatch in data dimensions!")
+        print(f"Features: {len(features)}, Labels: {len(labels)}, Subject IDs: {len(subject_ids)}")
+        return
+
     # Train classifiers
     results = train_multi_subject_classifier(features, labels, subject_ids)
     
