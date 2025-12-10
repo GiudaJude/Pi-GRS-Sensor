@@ -1,6 +1,3 @@
-import time
-import serial
-
 """Sensor wrapper for Grove GSR / ADC with desktop fallback simulation.
 
 This module provides a GroveGSRSensor class and an adc_to_us helper that
@@ -12,7 +9,7 @@ back to a simple simulator useful for desktop testing.
 import time
 import math
 import random
-
+import serial
 #try:
 #    from grove.adc import ADC
 #    _HAS_ADC = True
