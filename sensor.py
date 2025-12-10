@@ -1,3 +1,6 @@
+import time
+import serial
+
 """Sensor wrapper for Grove GSR / ADC with desktop fallback simulation.
 
 This module provides a GroveGSRSensor class and an adc_to_us helper that
@@ -9,12 +12,13 @@ back to a simple simulator useful for desktop testing.
 import time
 import math
 import random
-try:
-    from grove.adc import ADC
-    _HAS_ADC = True
-except Exception:
-    ADC = None
-    _HAS_ADC = False
+
+#try:
+#    from grove.adc import ADC
+#    _HAS_ADC = True
+#except Exception:
+#    ADC = None
+#    _HAS_ADC = False
 
 
 class GroveGSRSensor:
@@ -36,18 +40,29 @@ class GroveGSRSensor:
         self._t = 0.0
         self._dt = 1.0 / self.fs
         # Decide whether to simulate (default: simulate if ADC not present)
-        self.simulate = (_HAS_ADC is False) if simulate is None else bool(simulate)
+        # self.simulate = (_HAS_ADC is False) if simulate is None else bool(simulate)
+	    self.simulate = False
 
-        if not self.simulate and _HAS_ADC:
+        if not self.simulate: # and _HAS_ADC:
             try:
-                self._adc = ADC()
+                # self._adc = ADC()
+                # Initialize serial communication with ESP32  # !!!!
+                self._adc = serial.Serial(
+                                port='/dev/ttyUSB0', 
+                                baudrate=115200, 
+   							    parity= serial.PARITY_NONE,
+                                stopbits= serial.STOPBITS_ONE,
+                                bytesize= serial.EIGHTBITS,
+                                timeout=1 # Set a timeout for read operations
+                )
+                time.sleep(1)
             except Exception:
                 # If ADC instantiation fails, fall back to simulated mode
                 self.simulate = True
                 self._adc = None
         else:
             self._adc = None
-
+    
     def read_raw(self):
         """Return a raw ADC reading (float). In simulation returns ADC-like counts."""
         if self.simulate:
@@ -60,16 +75,23 @@ class GroveGSRSensor:
         else:
             try:
                 if hasattr(self._adc, 'read'):
-                    return float(self._adc.read(self.channel))
+                    # return float(self._adc.read(self.channel))
+                    return float(self._adc.read().decode('utf-8').strip())
                 if hasattr(self._adc, 'read_adc'):
-                    return float(self._adc.read_adc(self.channel))
+                    # return float(self._adc.read_adc(self.channel))
+                    return float(self._adc.read().decode('utf-8').strip())
                 if hasattr(self._adc, 'value'):
-                    return float(self._adc.value)
+                    # return float(self._adc.value)
+                    return float(self._adc.read().decode('utf-8').strip())
                 # Last resort: try constructing ADC with channel param
-                adc_obj = ADC(self.channel)
-                if hasattr(adc_obj, 'read'):
-                    return float(adc_obj.read())
-                return float(adc_obj.value)
+                #adc_obj = ADC(self.channel)
+                #if hasattr(adc_obj, 'read'):
+                #    return float(adc_obj.read())
+                #	   return float()
+                #return float(adc_obj.value)
+
+                return float(self._adc.read().decode('utf-8').strip())
+
             except Exception:
                 # On any hardware error, switch to simulation to keep program running
                 self.simulate = True
